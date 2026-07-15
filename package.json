@@ -1,0 +1,34 @@
+{
+  "name": "pi-background-jobs",
+  "version": "0.1.0",
+  "description": "Compact, non-interactive background shell jobs and management UI for Pi",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/neumie/pi-background-jobs.git"
+  },
+  "keywords": ["pi-package", "pi-extension", "pi", "background", "shell", "jobs"],
+  "files": ["src", "README.md", "LICENSE"],
+  "pi": { "extensions": ["src/index.ts"] },
+  "scripts": {
+    "test": "tsc -p tsconfig.test.json && node --test .test-dist/test/*.test.js",
+    "typecheck": "tsc --noEmit",
+    "check": "npm run typecheck && npm test"
+  },
+  "dependencies": {
+    "typebox": "^1.0.0"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "^0.80.6",
+    "@earendil-works/pi-coding-agent": "^0.80.6",
+    "@earendil-works/pi-tui": "^0.80.6"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-ai": "^0.80.6",
+    "@earendil-works/pi-coding-agent": "^0.80.6",
+    "@earendil-works/pi-tui": "^0.80.6",
+    "@types/node": "^22.0.0",
+    "typescript": "^5.0.0"
+  }
+}
