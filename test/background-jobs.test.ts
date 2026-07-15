@@ -508,11 +508,28 @@ test("extension coalesces completions and reuses singleton on reload", async () 
 	const first = fakePi();
 	extension(first as any);
 	const tool = first.tools[0];
-	await tool.execute("x", { action: "start", command: "printf one" });
-	await tool.execute("y", { action: "start", command: "printf two" });
+	await assert.rejects(
+		tool.execute("missing-label", { action: "start", command: "printf nope" }),
+		/label is required for start/,
+	);
+	const firstStart = await tool.execute("x", {
+		action: "start",
+		command: "printf one",
+		label: "Print first result",
+	});
+	assert.match(
+		firstStart.content[0].text,
+		new RegExp(`Started Print first result \\(job ${firstStart.details.job.id}\\)`),
+	);
+	await tool.execute("y", {
+		action: "start",
+		command: "printf two",
+		label: "Print second result",
+	});
 	await delay(250);
 	assert.equal(first.sent.length, 1);
-	assert.match(first.sent[0].message.content, /Background job/);
+	assert.match(first.sent[0].message.content, /Print first result \(job /);
+	assert.match(first.sent[0].message.content, /Print second result \(job /);
 	assert.deepEqual(first.sent[0].options, {
 		triggerTurn: true,
 		deliverAs: "followUp",
@@ -526,6 +543,7 @@ test("extension coalesces completions and reuses singleton on reload", async () 
 	const running = await tool.execute("z", {
 		action: "start",
 		command: "sleep 0.15; printf late",
+		label: "Print delayed result",
 	});
 	const id = running.details.job.id;
 	await first.handlers.session_shutdown({ reason: "reload" });
@@ -541,7 +559,7 @@ test("extension coalesces completions and reuses singleton on reload", async () 
 	assert.equal(second.sent.length, 1);
 	assert.match(
 		second.sent[0].message.content,
-		new RegExp(`job ${id} completed`),
+		new RegExp(`Print delayed result \\(job ${id}\\) completed`),
 	);
 	const list = await second.tools[0].execute("list", { action: "list" });
 	assert.ok(

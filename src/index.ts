@@ -62,13 +62,20 @@ function runtime(): Runtime {
 	return globalThis.__piBackgroundJobsRuntime;
 }
 
+function jobDisplayName(job: BackgroundJob): string {
+	const id = sanitizeText(job.id, 64);
+	const label = job.label && sanitizeText(job.label, 120);
+	return label ? `${label} (job ${id})` : `Background job ${id}`;
+}
+
 function completionLine(job: BackgroundJob): string {
+	const name = jobDisplayName(job);
 	if (job.state === "completed")
-		return `Background job ${job.id} completed (exit ${job.exitCode ?? 0}).`;
+		return `${name} completed (exit ${job.exitCode ?? 0}).`;
 	if (job.state === "timed_out")
-		return `Background job ${job.id} timed out and was stopped.`;
-	if (job.state === "stopped") return `Background job ${job.id} stopped.`;
-	return `Background job ${job.id} failed (exit ${job.exitCode ?? "unknown"}${job.signal ? `, ${job.signal}` : ""}).`;
+		return `${name} timed out and was stopped.`;
+	if (job.state === "stopped") return `${name} stopped.`;
+	return `${name} failed (exit ${job.exitCode ?? "unknown"}${job.signal ? `, ${job.signal}` : ""}).`;
 }
 
 function statusText(payload: JobsChangedPayload): string | undefined {
@@ -210,7 +217,7 @@ const Params = Type.Object({
 	),
 	label: Type.Optional(
 		Type.String({
-			description: "Short human-readable job label.",
+			description: "Short human-readable job label (required for start).",
 			maxLength: MAX_LABEL_LENGTH,
 		}),
 	),
@@ -245,7 +252,7 @@ export default function backgroundJobs(pi: ExtensionAPI): void {
 		promptSnippet:
 			"Run non-interactive shell work in the background and inspect it later.",
 		promptGuidelines: [
-			"Use background_job start for long non-interactive commands.",
+			"Use background_job start for long non-interactive commands and always give each job a concise human-readable label.",
 			"Use read only when output is needed; completed jobs are delivered automatically.",
 		],
 		parameters: Params,
@@ -254,17 +261,19 @@ export default function backgroundJobs(pi: ExtensionAPI): void {
 			try {
 				if (params.action === "start") {
 					if (!params.command) throw new Error("command is required for start");
+					if (!params.label?.trim())
+						throw new Error("label is required for start");
 					const job = await current.manager.start({
 						command: params.command,
 						cwd: params.cwd,
-						label: params.label,
+						label: params.label.trim(),
 						timeoutMs: params.timeoutMs,
 					});
 					return {
 						content: [
 							{
 								type: "text" as const,
-								text: `Started background job ${job.id}.`,
+								text: `Started ${jobDisplayName(job)}.`,
 							},
 						],
 						details: { action: "start", job },
@@ -316,7 +325,7 @@ export default function backgroundJobs(pi: ExtensionAPI): void {
 			const action = sanitizeText(args.action, 16);
 			const subject =
 				args.action === "start"
-					? sanitizeText(args.command || "", 180)
+					? sanitizeText(args.label || args.command || "", 180)
 					: sanitizeText(args.id || "", 64);
 			return new Text(
 				`${theme.fg("toolTitle", theme.bold("background_job "))}${theme.fg("accent", action)}${subject ? ` ${theme.fg("dim", subject)}` : ""}`,
@@ -381,7 +390,7 @@ export default function backgroundJobs(pi: ExtensionAPI): void {
 			const heading =
 				completions.length === 1
 					? completionLine(first.job)
-					: `${completions.length} background jobs finished: ${completions.map(({ job }) => job.id).join(", ")}.`;
+					: `${completions.length} background jobs finished: ${completions.map(({ job }) => jobDisplayName(job)).join(", ")}.`;
 			const detail = completions
 				.map(
 					({ job, output }) =>

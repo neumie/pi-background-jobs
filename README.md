@@ -16,14 +16,14 @@ For development, install the locked dependency graph with `npm ci`, then run Pi 
 
 `background_job` has four actions:
 
-- `start` — requires `command`; optional `cwd`, `label`, and positive `timeoutMs`. Returns a short process-local id immediately.
+- `start` — requires `command` and a concise human-readable `label`; accepts optional `cwd` and positive `timeoutMs`. Returns a short process-local id immediately.
 - `list` — lists active and retained recent jobs.
 - `read` — requires `id`; returns a bounded output tail.
 - `stop` — requires `id`; sends TERM to the process group and KILL after a short bounded grace period if needed.
 
 stdout and stderr are captured together in a bounded in-memory UTF-8 tail. Each job records start/end timestamps, exit code, signal, state, and bounded output metadata. Recent terminal jobs are bounded to 40 and the output tail to 16 KiB by default. Output is sanitised before display; no terminal escape sequences or hidden model reasoning are forwarded.
 
-Start rows show the actual command and collapse to `Running in background (/jobs to manage)`. Expand a tool row with Pi's configured tool-expand shortcut to inspect available detail. Completion messages are coalesced briefly, provide a factual bounded tail to the model, and request a follow-up turn.
+Start rows show the human-readable label and collapse to `Running in background (/jobs to manage)`. Expand a tool row with Pi's configured tool-expand shortcut to inspect available detail. Completion messages lead with that label and retain the short process-local id only as secondary context—for example, `Validate configuration (job 0c) completed (exit 0).` They are coalesced briefly, provide a factual bounded tail to the model, and request a follow-up turn.
 
 ## `/jobs`
 
