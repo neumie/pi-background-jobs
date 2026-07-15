@@ -1,7 +1,4 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { mkdtemp, rm, writeFile, appendFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 
 export const MAX_TIMEOUT_MS = 2_147_483_647;
@@ -29,7 +26,6 @@ export interface BackgroundJob {
 	signal?: NodeJS.Signals | null;
 	timeoutMs?: number;
 	stopReason?: StopReason;
-	logPath: string;
 	bytesCaptured: number;
 	outputTruncated: boolean;
 }
@@ -41,12 +37,13 @@ export interface StartOptions {
 	timeoutMs?: number;
 }
 export interface JobManagerOptions {
-	maxLogBytes?: number;
 	maxTailBytes?: number;
 	maxRecent?: number;
 	killGraceMs?: number;
 	shell?: string;
 	now?: () => number;
+	/** Receives exceptions thrown by change or completion listeners. */
+	onListenerError?: (error: unknown) => void;
 }
 
 export interface JobsChangedPayload {
@@ -59,6 +56,7 @@ export interface JobsChangedPayload {
 type InternalJob = BackgroundJob & {
 	child?: ChildProcess;
 	tail: Buffer;
+	utf8Pending: Buffer;
 	timeoutTimer?: ReturnType<typeof setTimeout>;
 	killTimer?: ReturnType<typeof setTimeout>;
 	processGroupId?: number;
@@ -66,104 +64,65 @@ type InternalJob = BackgroundJob & {
 };
 
 const defaults = {
-	maxLogBytes: 256 * 1024,
 	maxTailBytes: 16 * 1024,
 	maxRecent: 40,
 	killGraceMs: 750,
 };
 
+type LifecycleState = "open" | "shutting-down" | "closed";
+type Listener<Args extends unknown[]> = (...args: Args) => void | Promise<void>;
+
 /** A process manager deliberately limited to non-interactive `shell -c` jobs. */
 export class JobManager {
-	private readonly options: Required<Omit<JobManagerOptions, "shell" | "now">> &
-		Pick<JobManagerOptions, "shell" | "now">;
+	private readonly options: Required<
+		Omit<JobManagerOptions, "shell" | "now" | "onListenerError">
+	> &
+		Pick<JobManagerOptions, "shell" | "now" | "onListenerError">;
 	private jobs = new Map<string, InternalJob>();
 	private sequence = 0;
-	private logDir?: string;
-	private changeListeners = new Set<(payload: JobsChangedPayload) => void>();
-	private completionListeners = new Set<
-		(job: BackgroundJob, tail: string) => void
-	>();
-	private cleaned = false;
+	private changeListeners = new Set<Listener<[JobsChangedPayload]>>();
+	private completionListeners = new Set<Listener<[BackgroundJob, string]>>();
+	private lifecycleState: LifecycleState = "open";
+	private lifecycleQueue: Promise<void> = Promise.resolve();
+	private shutdownPromise?: Promise<void>;
 
 	constructor(options: JobManagerOptions = {}) {
-		this.options = { ...defaults, ...options };
+		this.options = {
+			...defaults,
+			...options,
+			maxTailBytes: validateNonNegativeSafeInteger(
+				options.maxTailBytes ?? defaults.maxTailBytes,
+				"maxTailBytes",
+			),
+			maxRecent: validateNonNegativeSafeInteger(
+				options.maxRecent ?? defaults.maxRecent,
+				"maxRecent",
+			),
+			killGraceMs: validateNonNegativeSafeInteger(
+				options.killGraceMs ?? defaults.killGraceMs,
+				"killGraceMs",
+			),
+		};
 	}
 
-	onChanged(listener: (payload: JobsChangedPayload) => void): () => void {
+	onChanged(listener: Listener<[JobsChangedPayload]>): () => void {
 		this.changeListeners.add(listener);
 		return () => this.changeListeners.delete(listener);
 	}
 
-	onCompleted(
-		listener: (job: BackgroundJob, tail: string) => void,
-	): () => void {
+	onCompleted(listener: Listener<[BackgroundJob, string]>): () => void {
 		this.completionListeners.add(listener);
 		return () => this.completionListeners.delete(listener);
 	}
 
 	async start(input: StartOptions): Promise<BackgroundJob> {
-		if (this.cleaned)
-			throw new Error("Background jobs manager has been shut down");
-		if (!input.command.trim()) throw new Error("command is required");
-		if (input.command.length > MAX_COMMAND_LENGTH)
-			throw new Error(`command must be at most ${MAX_COMMAND_LENGTH} characters`);
-		if (input.cwd && input.cwd.length > MAX_CWD_LENGTH)
-			throw new Error(`cwd must be at most ${MAX_CWD_LENGTH} characters`);
-		if (input.label && input.label.length > MAX_LABEL_LENGTH)
-			throw new Error(`label must be at most ${MAX_LABEL_LENGTH} characters`);
-		if (
-			input.timeoutMs !== undefined &&
-			(!Number.isInteger(input.timeoutMs) ||
-				input.timeoutMs < 1 ||
-				input.timeoutMs > MAX_TIMEOUT_MS)
-		) {
-			throw new Error(`timeoutMs must be an integer between 1 and ${MAX_TIMEOUT_MS}`);
-		}
-		if (!this.logDir)
-			this.logDir = await mkdtemp(join(tmpdir(), "pi-background-jobs-"));
-		const id = (++this.sequence).toString(36).padStart(2, "0");
-		const startedAt = this.now();
-		const cwd = input.cwd || process.cwd();
-		const logPath = join(this.logDir, `${id}.log`);
-		await writeFile(logPath, "");
-		const shell = this.options.shell || process.env.SHELL || "/bin/sh";
-		const child = spawn(shell, ["-c", input.command], {
-			cwd,
-			detached: process.platform !== "win32",
-			stdio: ["ignore", "pipe", "pipe"],
+		const snapshot = Object.freeze({ ...input });
+		this.validateStart(snapshot);
+		return this.enqueueLifecycle(() => {
+			if (this.lifecycleState !== "open")
+				throw new Error("Background jobs manager has been shut down");
+			return this.startNow(snapshot);
 		});
-		const job: InternalJob = {
-			id,
-			command: input.command,
-			cwd,
-			label: input.label?.trim() || undefined,
-			state: "running",
-			startedAt,
-			timeoutMs: input.timeoutMs,
-			logPath,
-			bytesCaptured: 0,
-			outputTruncated: false,
-			child,
-			processGroupId: process.platform === "win32" ? undefined : child.pid,
-			tail: Buffer.alloc(0),
-		};
-		this.jobs.set(id, job);
-		child.stdout?.on("data", (data: Buffer) => this.capture(job, data));
-		child.stderr?.on("data", (data: Buffer) => this.capture(job, data));
-		child.once("error", (error) =>
-			void this.finish(job, null, null, `Unable to spawn shell: ${error.message}\n`),
-		);
-		child.once("close", (code, signal) => void this.finish(job, code, signal));
-		if (input.timeoutMs) {
-			job.timeoutTimer = setTimeout(
-				() => void this.stop(id, "timeout"),
-				input.timeoutMs,
-			);
-			job.timeoutTimer.unref?.();
-		}
-		this.trimRecent();
-		this.emitChanged();
-		return this.snapshot(job);
 	}
 
 	list(): BackgroundJob[] {
@@ -180,16 +139,12 @@ export class JobManager {
 		id: string,
 		maxBytes = this.options.maxTailBytes,
 	): Promise<{ job: BackgroundJob; output: string }> {
+		validateNonNegativeSafeInteger(maxBytes, "maxBytes");
 		const job = this.jobs.get(id);
 		if (!job) throw new Error(`Unknown background job: ${id}`);
-		// Disk logs are recoverable across renderer/UI refreshes; the in-memory ring includes newest live output.
-		// The ring is updated synchronously with stream data, unlike the asynchronous disk append,
-		// so it is the authoritative live tail. The on-disk log remains recoverable for the retained job.
 		return {
 			job: this.snapshot(job),
-			output: job.tail
-				.subarray(Math.max(0, job.tail.length - maxBytes))
-				.toString("utf8"),
+			output: decodeUtf8Tail(job.tail, maxBytes),
 		};
 	}
 
@@ -202,31 +157,39 @@ export class JobManager {
 		this.signal(job, "SIGTERM");
 		job.killTimer = setTimeout(() => {
 			job.killTimer = undefined;
-			if (job.state === "running" && !job.finishing) this.signal(job, "SIGKILL");
+			if (job.state === "running" && !job.finishing)
+				this.signal(job, "SIGKILL");
 		}, this.options.killGraceMs);
 		job.killTimer.unref?.();
 		this.emitChanged();
 		return this.snapshot(job);
 	}
 
-	async shutdown(): Promise<void> {
-		if (this.cleaned) return;
-		this.cleaned = true;
-		const active = [...this.jobs.values()].filter((job) => job.state === "running");
-		await Promise.all(active.map((job) => this.stop(job.id, "shutdown")));
-		if (active.length > 0) {
-			const deadline = Date.now() + this.options.killGraceMs + 50;
-			while (Date.now() < deadline && active.some((job) => job.state === "running")) {
-				await delay(Math.min(25, Math.max(1, deadline - Date.now())));
+	shutdown(): Promise<void> {
+		if (this.shutdownPromise) return this.shutdownPromise;
+		this.lifecycleState = "shutting-down";
+		this.shutdownPromise = this.enqueueLifecycle(async () => {
+			const active = [...this.jobs.values()].filter(
+				(job) => job.state === "running",
+			);
+			await Promise.all(active.map((job) => this.stop(job.id, "shutdown")));
+			if (active.length > 0) {
+				const deadline = Date.now() + this.options.killGraceMs + 50;
+				while (
+					Date.now() < deadline &&
+					active.some((job) => job.state === "running")
+				) {
+					await delay(Math.min(25, Math.max(1, deadline - Date.now())));
+				}
+				for (const job of active) {
+					if (job.state === "running") this.signal(job, "SIGKILL");
+				}
+				await delay(25);
 			}
-			for (const job of active) {
-				if (job.state === "running") this.signal(job, "SIGKILL");
-			}
-			await delay(25);
-		}
-		if (this.logDir) await rm(this.logDir, { recursive: true, force: true });
-		this.logDir = undefined;
-		this.emitChanged();
+			this.lifecycleState = "closed";
+			this.emitChanged();
+		});
+		return this.shutdownPromise;
 	}
 
 	payload(): JobsChangedPayload {
@@ -253,11 +216,96 @@ export class JobManager {
 		const job = this.jobs.get(id);
 		if (!job || job.state === "running") return false;
 		this.jobs.delete(id);
-		void rm(job.logPath, { force: true });
 		this.emitChanged();
 		return true;
 	}
 
+	private validateStart(input: StartOptions): void {
+		if (!input.command.trim()) throw new Error("command is required");
+		if (input.command.length > MAX_COMMAND_LENGTH)
+			throw new Error(
+				`command must be at most ${MAX_COMMAND_LENGTH} characters`,
+			);
+		if (input.cwd && input.cwd.length > MAX_CWD_LENGTH)
+			throw new Error(`cwd must be at most ${MAX_CWD_LENGTH} characters`);
+		if (input.label && input.label.length > MAX_LABEL_LENGTH)
+			throw new Error(`label must be at most ${MAX_LABEL_LENGTH} characters`);
+		if (
+			input.timeoutMs !== undefined &&
+			(!Number.isInteger(input.timeoutMs) ||
+				input.timeoutMs < 1 ||
+				input.timeoutMs > MAX_TIMEOUT_MS)
+		) {
+			throw new Error(
+				`timeoutMs must be an integer between 1 and ${MAX_TIMEOUT_MS}`,
+			);
+		}
+	}
+	private startNow(input: StartOptions): BackgroundJob {
+		const id = (++this.sequence).toString(36).padStart(2, "0");
+		const startedAt = this.now();
+		const cwd = input.cwd || process.cwd();
+		const shell = this.options.shell || process.env.SHELL || "/bin/sh";
+		const child = spawn(shell, ["-c", input.command], {
+			cwd,
+			detached: process.platform !== "win32",
+			stdio: ["ignore", "pipe", "pipe"],
+		});
+		const job: InternalJob = {
+			id,
+			command: input.command,
+			cwd,
+			label: input.label?.trim() || undefined,
+			state: "running",
+			startedAt,
+			timeoutMs: input.timeoutMs,
+			bytesCaptured: 0,
+			outputTruncated: false,
+			child,
+			processGroupId: process.platform === "win32" ? undefined : child.pid,
+			tail: Buffer.alloc(0),
+			utf8Pending: Buffer.alloc(0),
+		};
+		this.jobs.set(id, job);
+		child.stdout?.on("data", (data: Buffer) => this.capture(job, data));
+		child.stderr?.on("data", (data: Buffer) => this.capture(job, data));
+		child.once(
+			"error",
+			(error) =>
+				void this.finish(
+					job,
+					null,
+					null,
+					`Unable to spawn shell: ${error.message}\n`,
+				).catch((error) => this.reportListenerError(error)),
+		);
+		child.once(
+			"close",
+			(code, signal) =>
+				void this.finish(job, code, signal).catch((error) =>
+					this.reportListenerError(error),
+				),
+		);
+		if (input.timeoutMs) {
+			job.timeoutTimer = setTimeout(() => {
+				void this.stop(id, "timeout").catch((error) =>
+					this.reportListenerError(error),
+				);
+			}, input.timeoutMs);
+			job.timeoutTimer.unref?.();
+		}
+		this.trimRecent();
+		this.emitChanged();
+		return this.snapshot(job);
+	}
+	private enqueueLifecycle<T>(operation: () => T | Promise<T>): Promise<T> {
+		const result = this.lifecycleQueue.then(operation, operation);
+		this.lifecycleQueue = result.then(
+			() => undefined,
+			() => undefined,
+		);
+		return result;
+	}
 	private now(): number {
 		return this.options.now?.() ?? Date.now();
 	}
@@ -265,6 +313,7 @@ export class JobManager {
 		const {
 			child: _child,
 			tail: _tail,
+			utf8Pending: _utf8Pending,
 			timeoutTimer: _timeout,
 			killTimer: _kill,
 			processGroupId: _processGroupId,
@@ -275,15 +324,15 @@ export class JobManager {
 	}
 	private capture(job: InternalJob, data: Buffer): void {
 		job.bytesCaptured += data.length;
-		job.tail = Buffer.concat([job.tail, data]).subarray(
-			Math.max(0, job.tail.length + data.length - this.options.maxTailBytes),
-		);
-		if (job.bytesCaptured <= this.options.maxLogBytes)
-			void appendFile(job.logPath, data).catch(() => {});
-		else job.outputTruncated = true;
+		const combined = Buffer.concat([job.tail, job.utf8Pending, data]);
+		const { complete, pending } = splitIncompleteUtf8(combined);
+		job.utf8Pending = pending;
+		if (complete.length > this.options.maxTailBytes) job.outputTruncated = true;
+		job.tail = utf8Tail(complete, this.options.maxTailBytes);
 	}
 	private signal(job: InternalJob, signal: NodeJS.Signals): void {
-		const target = process.platform === "win32" ? job.child?.pid : job.processGroupId;
+		const target =
+			process.platform === "win32" ? job.child?.pid : job.processGroupId;
 		if (!target) return;
 		try {
 			process.kill(process.platform === "win32" ? target : -target, signal);
@@ -354,22 +403,118 @@ export class JobManager {
 		this.trimRecent();
 		const snap = this.snapshot(job);
 		const tail = job.tail.toString("utf8");
-		for (const listener of this.completionListeners) listener(snap, tail);
+		this.notify(this.completionListeners, snap, tail);
 		this.emitChanged();
 	}
 	private trimRecent(): void {
 		const terminal = [...this.jobs.values()]
 			.filter((job) => job.state !== "running")
 			.sort((a, b) => (b.endedAt || 0) - (a.endedAt || 0));
-		for (const job of terminal.slice(this.options.maxRecent)) {
+		for (const job of terminal.slice(this.options.maxRecent))
 			this.jobs.delete(job.id);
-			void rm(job.logPath, { force: true });
-		}
 	}
 	private emitChanged(): void {
-		const payload = this.payload();
-		for (const listener of this.changeListeners) listener(payload);
+		this.notify(this.changeListeners, this.payload());
 	}
+	private notify<T extends unknown[]>(
+		listeners: Set<Listener<T>>,
+		...args: T
+	): void {
+		for (const listener of listeners) {
+			try {
+				const result = listener(...args);
+				if (result)
+					void result.catch((error) => this.reportListenerError(error));
+			} catch (error) {
+				this.reportListenerError(error);
+			}
+		}
+	}
+	private reportListenerError(error: unknown): void {
+		try {
+			this.options.onListenerError?.(error);
+		} catch {
+			// Error reporters must not become another asynchronous failure path.
+		}
+	}
+}
+
+function validateNonNegativeSafeInteger(value: number, name: string): number {
+	if (!Number.isSafeInteger(value) || value < 0)
+		throw new Error(`${name} must be a non-negative safe integer`);
+	return value;
+}
+
+/** Keeps the newest complete UTF-8 code points within a byte limit. */
+function utf8Tail(value: Buffer, maxBytes: number): Buffer {
+	let start = Math.max(0, value.length - maxBytes);
+	while (start < value.length && (value[start]! & 0xc0) === 0x80) start += 1;
+	let end = value.length;
+	while (end > start) {
+		let codePointStart = end - 1;
+		while (codePointStart > start && (value[codePointStart]! & 0xc0) === 0x80)
+			codePointStart -= 1;
+		const leading = value[codePointStart]!;
+		const expectedLength =
+			leading >= 0xc2 && leading <= 0xdf
+				? 2
+				: leading >= 0xe0 && leading <= 0xef
+					? 3
+					: leading >= 0xf0 && leading <= 0xf4
+						? 4
+						: 1;
+		if (end - codePointStart >= expectedLength) break;
+		end = codePointStart;
+	}
+	return value.subarray(start, end);
+}
+
+function decodeUtf8Tail(value: Buffer, maxBytes: number): string {
+	return utf8Tail(value, maxBytes).toString("utf8");
+}
+
+function splitIncompleteUtf8(value: Buffer): {
+	complete: Buffer;
+	pending: Buffer;
+} {
+	if (!value.length) return { complete: value, pending: value };
+	let start = value.length - 1;
+	while (start > 0 && (value[start]! & 0xc0) === 0x80) start -= 1;
+	const leading = value[start]!;
+	const expectedLength =
+		leading >= 0xc2 && leading <= 0xdf
+			? 2
+			: leading >= 0xe0 && leading <= 0xef
+				? 3
+				: leading >= 0xf0 && leading <= 0xf4
+					? 4
+					: 1;
+	if (value.length - start < expectedLength)
+		return {
+			complete: value.subarray(0, start),
+			pending: value.subarray(start),
+		};
+	return { complete: value, pending: Buffer.alloc(0) };
+}
+
+function normalizedLimit(limit: number): number {
+	if (limit === Number.POSITIVE_INFINITY) return Number.MAX_SAFE_INTEGER;
+	return Number.isFinite(limit) ? Math.max(0, Math.floor(limit)) : 0;
+}
+
+function truncateCodePoints(
+	value: string,
+	limit: number,
+	fromEnd: boolean,
+): string {
+	const points = Array.from(value);
+	if (points.length <= limit) return value;
+	if (limit === 0) return "";
+	if (limit === 1) return "…";
+	const retained = fromEnd
+		? points.slice(-(limit - 1))
+		: points.slice(0, limit - 1);
+	return fromEnd ? `…${retained.join("")}` : `${retained.join("")}…`;
 }
 
 export function sanitizeOutput(value: string, limit = 16_384): string {
@@ -379,15 +524,14 @@ export function sanitizeOutput(value: string, limit = 16_384): string {
 		.replace(/\u009b[0-?]*[ -/]*[@-~]/g, "")
 		.replace(/\r(?!\n)/g, "")
 		.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]/g, "�");
-	return cleaned.length > limit ? `…${cleaned.slice(-Math.max(0, limit - 1))}` : cleaned;
+	return truncateCodePoints(cleaned, normalizedLimit(limit), true);
 }
 
 export function sanitizeText(value: string, limit = 240): string {
-	const cleaned = sanitizeOutput(value, Math.max(limit * 4, 1024))
+	const safeLimit = normalizedLimit(limit);
+	const cleaned = sanitizeOutput(value, Math.max(safeLimit * 4, 1024))
 		.replace(/[\n\t]+/g, " ")
 		.replace(/\s+/g, " ")
 		.trim();
-	return cleaned.length > limit
-		? `${cleaned.slice(0, Math.max(0, limit - 1))}…`
-		: cleaned;
+	return truncateCodePoints(cleaned, safeLimit, false);
 }

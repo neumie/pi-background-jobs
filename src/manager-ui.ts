@@ -1,5 +1,9 @@
 import type { Theme } from "@earendil-works/pi-coding-agent";
-import { matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import {
+	matchesKey,
+	truncateToWidth,
+	visibleWidth,
+} from "@earendil-works/pi-tui";
 import type { BackgroundJob, JobManager } from "./job-manager.js";
 import { sanitizeOutput, sanitizeText } from "./job-manager.js";
 
@@ -24,7 +28,12 @@ const elapsed = (job: BackgroundJob, now = Date.now()): string => {
 			: `${Math.floor(ms / 60_000)}m${Math.floor((ms % 60_000) / 1000)}s`;
 };
 
-function frame(width: number, title: string, body: string[], footer?: string): string[] {
+function frame(
+	width: number,
+	title: string,
+	body: string[],
+	footer?: string,
+): string[] {
 	const safeWidth = Math.max(1, width);
 	if (safeWidth < 4) return [truncateToWidth(title, safeWidth, "")];
 	const innerWidth = safeWidth - 2;
@@ -37,15 +46,23 @@ function frame(width: number, title: string, body: string[], footer?: string): s
 	const lines = [top, ...body.map((value) => `│${fit(value)}│`)];
 	if (footer) {
 		const safeFooter = truncateToWidth(` ${footer} `, innerWidth, "…");
-		lines.push(`├${safeFooter}${"─".repeat(Math.max(0, innerWidth - visibleWidth(safeFooter)))}┤`);
+		lines.push(
+			`├${safeFooter}${"─".repeat(Math.max(0, innerWidth - visibleWidth(safeFooter)))}┤`,
+		);
 	}
 	lines.push(`╰${"─".repeat(innerWidth)}╯`);
 	return lines;
 }
 
-function listWindow(jobs: BackgroundJob[], selected: number): { start: number; jobs: BackgroundJob[] } {
+function listWindow(
+	jobs: BackgroundJob[],
+	selected: number,
+): { start: number; jobs: BackgroundJob[] } {
 	const maxStart = Math.max(0, jobs.length - LIST_ROWS);
-	const start = Math.min(maxStart, Math.max(0, selected - Math.floor(LIST_ROWS / 2)));
+	const start = Math.min(
+		maxStart,
+		Math.max(0, selected - Math.floor(LIST_ROWS / 2)),
+	);
 	return { start, jobs: jobs.slice(start, start + LIST_ROWS) };
 }
 
@@ -66,8 +83,10 @@ export function renderJobsLines(
 	) => (theme ? theme.fg(name, text) : text);
 	const body: string[] = [];
 	const window = listWindow(jobs, selected);
-	if (window.start > 0) body.push(color("dim", `  … ${window.start} newer jobs`));
-	if (!jobs.length) body.push(` ${color("dim", "No jobs in this Pi session.")}`);
+	if (window.start > 0)
+		body.push(color("dim", `  … ${window.start} newer jobs`));
+	if (!jobs.length)
+		body.push(` ${color("dim", "No jobs in this Pi session.")}`);
 	window.jobs.forEach((job, visibleIndex) => {
 		const index = window.start + visibleIndex;
 		const marker = index === selected ? color("accent", "›") : " ";
@@ -79,8 +98,13 @@ export function renderJobsLines(
 					: job.state === "failed" || job.state === "timed_out"
 						? "error"
 						: "dim";
-		const label = sanitizeText(job.label || job.command, Math.max(12, width - 25));
-		body.push(` ${marker} ${color(stateColor, status(job).padEnd(4))} ${elapsed(job).padStart(6)} ${job.id} ${label}`);
+		const label = sanitizeText(
+			job.label || job.command,
+			Math.max(12, width - 25),
+		);
+		body.push(
+			` ${marker} ${color(stateColor, status(job).padEnd(4))} ${elapsed(job).padStart(6)} ${job.id} ${label}`,
+		);
 	});
 	const hiddenOlder = jobs.length - window.start - window.jobs.length;
 	if (hiddenOlder > 0) body.push(color("dim", `  … ${hiddenOlder} older jobs`));
@@ -88,21 +112,32 @@ export function renderJobsLines(
 	const active = jobs[selected];
 	if (detail && active) {
 		body.push(color("dim", "─".repeat(Math.max(1, width - 4))));
-		body.push(`${color("accent", "Command:")} ${sanitizeText(active.command, Math.max(1, width - 13))}`);
-		body.push(color("dim", `cwd: ${sanitizeText(active.cwd, Math.max(1, width - 8))}`));
+		body.push(
+			`${color("accent", "Command:")} ${sanitizeText(active.command, Math.max(1, width - 13))}`,
+		);
+		body.push(
+			color("dim", `cwd: ${sanitizeText(active.cwd, Math.max(1, width - 8))}`),
+		);
 		body.push(
 			color(
 				"dim",
 				`exit: ${active.exitCode ?? "—"} · signal: ${active.signal ?? "—"} · captured: ${active.bytesCaptured}B${active.outputTruncated ? " (bounded)" : ""}`,
 			),
 		);
-		body.push(`${color("accent", "Output")} ${following ? color("warning", "· FOLLOW") : ""}`.trimEnd());
-		const outputLines = sanitizeOutput(output || "(no output captured yet)")
-			.split("\n");
-		const end = Math.max(0, outputLines.length - Math.max(0, outputScrollFromEnd));
+		body.push(
+			`${color("accent", "Output")} ${following ? color("warning", "· FOLLOW") : ""}`.trimEnd(),
+		);
+		const outputLines = sanitizeOutput(
+			output || "(no output captured yet)",
+		).split("\n");
+		const end = Math.max(
+			0,
+			outputLines.length - Math.max(0, outputScrollFromEnd),
+		);
 		const start = Math.max(0, end - OUTPUT_ROWS);
 		if (start > 0) body.push(color("dim", `… ${start} earlier lines`));
-		for (const value of outputLines.slice(start, end)) body.push(` ${sanitizeText(value, Math.max(1, width - 5))}`);
+		for (const value of outputLines.slice(start, end))
+			body.push(` ${sanitizeText(value, Math.max(1, width - 5))}`);
 		const later = outputLines.length - end;
 		if (later > 0) body.push(color("dim", `… ${later} later lines`));
 	}
@@ -110,7 +145,12 @@ export function renderJobsLines(
 	const footer = detail
 		? "PgUp/PgDn scroll · ←/→ switch · End follow · s stop · B list · ? help"
 		: "↑/↓ select · Enter detail · s stop · d dismiss · ? help · Esc close";
-	return frame(width, `Jobs · ${jobs.filter((job) => job.state === "running").length} running`, body, footer);
+	return frame(
+		width,
+		`Jobs · ${jobs.filter((job) => job.state === "running").length} running`,
+		body,
+		footer,
+	);
 }
 
 function renderHelpLines(width: number, theme: Theme): string[] {
@@ -122,7 +162,7 @@ function renderHelpLines(width: number, theme: Theme): string[] {
 			" ↑/↓: select in list · ←/→: switch in detail",
 			" PgUp/PgDn: scroll output · End or f: follow newest",
 			" s: stop with TERM, then KILL after the grace period",
-			" d: dismiss a terminal job and remove its retained log",
+			" d: dismiss a terminal job and remove it from the recent list",
 			" B/Backspace: return to list · Esc: close",
 		].map((line) => theme.fg("dim", line)),
 		"? close help",
@@ -160,12 +200,18 @@ export class JobsComponent {
 		const jobs = this.manager.list();
 		const selected = this.resolveSelection(jobs);
 		const lower = data.toLowerCase();
-		if (matchesKey(data, "escape") || matchesKey(data, "ctrl+c")) return this.done();
+		if (matchesKey(data, "escape") || matchesKey(data, "ctrl+c"))
+			return this.done();
 		if (this.help && (lower === "h" || lower === "?")) this.help = false;
 		else if (lower === "h" || lower === "?") this.help = true;
 		else if (this.detail) this.handleDetailInput(data, lower, jobs);
-		else if (matchesKey(data, "up") || lower === "k") this.selectIndex(jobs, Math.max(0, selected - 1));
-		else if (matchesKey(data, "down") || lower === "j") this.selectIndex(jobs, Math.min(Math.max(0, jobs.length - 1), selected + 1));
+		else if (matchesKey(data, "up") || lower === "k")
+			this.selectIndex(jobs, Math.max(0, selected - 1));
+		else if (matchesKey(data, "down") || lower === "j")
+			this.selectIndex(
+				jobs,
+				Math.min(Math.max(0, jobs.length - 1), selected + 1),
+			);
 		else if (matchesKey(data, "return")) {
 			this.detail = true;
 			this.outputScrollFromEnd = 0;
@@ -177,23 +223,45 @@ export class JobsComponent {
 			const job = jobs[selected];
 			if (job && this.manager.dismiss(job.id)) {
 				this.selectedId = undefined;
-				this.selectedIndexHint = Math.min(selected, Math.max(0, this.manager.list().length - 1));
+				this.selectedIndexHint = Math.min(
+					selected,
+					Math.max(0, this.manager.list().length - 1),
+				);
 			}
 		}
 		this.invalidate();
 		this.requestRender();
 	}
 
-	private handleDetailInput(data: string, lower: string, jobs: BackgroundJob[]): void {
-		if (lower === "b" || matchesKey(data, "backspace") || matchesKey(data, "return")) {
+	private handleDetailInput(
+		data: string,
+		lower: string,
+		jobs: BackgroundJob[],
+	): void {
+		if (
+			lower === "b" ||
+			matchesKey(data, "backspace") ||
+			matchesKey(data, "return")
+		) {
 			this.detail = false;
 			this.stopFollowing();
 			return;
 		}
-		if (matchesKey(data, "left") || matchesKey(data, "up")) this.changeSelection(-1, jobs);
-		else if (matchesKey(data, "right") || matchesKey(data, "down") || matchesKey(data, "tab")) this.changeSelection(1, jobs);
-		else if (matchesKey(data, "pageUp")) this.outputScrollFromEnd += OUTPUT_ROWS;
-		else if (matchesKey(data, "pageDown")) this.outputScrollFromEnd = Math.max(0, this.outputScrollFromEnd - OUTPUT_ROWS);
+		if (matchesKey(data, "left") || matchesKey(data, "up"))
+			this.changeSelection(-1, jobs);
+		else if (
+			matchesKey(data, "right") ||
+			matchesKey(data, "down") ||
+			matchesKey(data, "tab")
+		)
+			this.changeSelection(1, jobs);
+		else if (matchesKey(data, "pageUp"))
+			this.outputScrollFromEnd += OUTPUT_ROWS;
+		else if (matchesKey(data, "pageDown"))
+			this.outputScrollFromEnd = Math.max(
+				0,
+				this.outputScrollFromEnd - OUTPUT_ROWS,
+			);
 		else if (matchesKey(data, "end") || lower === "f") {
 			this.outputScrollFromEnd = 0;
 			this.startFollowing();
@@ -210,8 +278,11 @@ export class JobsComponent {
 			this.selectedIndexHint = 0;
 			return 0;
 		}
-		const byId = this.selectedId ? jobs.findIndex((job) => job.id === this.selectedId) : -1;
-		const index = byId >= 0 ? byId : Math.min(this.selectedIndexHint, jobs.length - 1);
+		const byId = this.selectedId
+			? jobs.findIndex((job) => job.id === this.selectedId)
+			: -1;
+		const index =
+			byId >= 0 ? byId : Math.min(this.selectedIndexHint, jobs.length - 1);
 		this.selectedId = jobs[index]?.id;
 		this.selectedIndexHint = index;
 		return index;
@@ -285,7 +356,7 @@ export class JobsComponent {
 			this.output = read.output;
 			if (read.job.state !== "running") this.stopFollowing();
 		} catch {
-			this.output = "(log is no longer available)";
+			this.output = "(output is no longer available)";
 		}
 		this.invalidate();
 		this.requestRender();

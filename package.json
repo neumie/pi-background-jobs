@@ -3,6 +3,10 @@
   "version": "0.1.0",
   "description": "Compact, non-interactive background shell jobs and management UI for Pi",
   "type": "module",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "packageManager": "npm@11.5.2",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -12,7 +16,7 @@
   "files": ["src", "README.md", "LICENSE"],
   "pi": { "extensions": ["src/index.ts"] },
   "scripts": {
-    "test": "tsc -p tsconfig.test.json && node --test .test-dist/test/*.test.js",
+    "test": "node -e \"require('node:fs').rmSync('.test-dist', { recursive: true, force: true })\" && tsc -p tsconfig.test.json && node --test .test-dist/test/*.test.js",
     "typecheck": "tsc --noEmit",
     "check": "npm run typecheck && npm test"
   },

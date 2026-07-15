@@ -21,6 +21,10 @@ import {
 import { JobsComponent } from "./manager-ui.js";
 
 const COMPLETION_TYPE = "background-jobs:completion";
+const MAX_PENDING_COMPLETIONS = 64;
+const MAX_COMPLETIONS_PER_MESSAGE = 8;
+const MAX_COMPLETION_OUTPUT_CHARS = 2_000;
+const MAX_COMPLETION_MESSAGE_CHARS = 16_000;
 
 interface Completion {
 	job: BackgroundJob;
@@ -39,6 +43,7 @@ interface Runtime {
 	changedUnsub?: () => void;
 	completedUnsub?: () => void;
 	pending: Completion[];
+	pendingOmitted: number;
 	completionTimer?: ReturnType<typeof setTimeout>;
 	reloading?: boolean;
 }
@@ -52,6 +57,7 @@ function runtime(): Runtime {
 		globalThis.__piBackgroundJobsRuntime = {
 			manager: new JobManager(),
 			pending: [],
+			pendingOmitted: 0,
 		};
 	return globalThis.__piBackgroundJobsRuntime;
 }
@@ -72,31 +78,92 @@ function statusText(payload: JobsChangedPayload): string | undefined {
 }
 
 function scheduleCompletions(current: Runtime): void {
-	if (current.completionTimer || current.pending.length === 0) return;
+	if (
+		current.completionTimer ||
+		current.pending.length === 0 ||
+		!current.pi ||
+		current.reloading
+	)
+		return;
 	current.completionTimer = setTimeout(() => {
 		current.completionTimer = undefined;
-		if (!current.pi || current.reloading) {
-			scheduleCompletions(current);
-			return;
-		}
-		const completions = current.pending.splice(0);
-		const content = completions
-			.map(
+		if (!current.pi || current.reloading) return;
+		const { completions, omitted } = takeCompletions(current);
+		if (!completions.length) return;
+		const content = [
+			...completions.map(
 				({ job, output }) =>
-					`${completionLine(job)}\nTail:\n${output.slice(-4000) || "(no output)"}`,
-			)
-			.join("\n\n");
-		current.pi.sendMessage(
-			{
-				customType: COMPLETION_TYPE,
-				content,
-				display: true,
-				details: completions,
-			},
-			{ triggerTurn: true, deliverAs: "followUp" },
-		);
+					`${completionLine(job)}\nTail:\n${output || "(no output)"}`,
+			),
+			...(omitted
+				? [
+						`${omitted} additional completion${omitted === 1 ? " was" : "s were"} omitted due to delivery limits.`,
+					]
+				: []),
+		].join("\n\n");
+		try {
+			const sent = current.pi.sendMessage(
+				{
+					customType: COMPLETION_TYPE,
+					content,
+					display: true,
+					details: completions,
+				},
+				{ triggerTurn: true, deliverAs: "followUp" },
+			);
+			void Promise.resolve(sent).catch(() => {});
+		} catch {
+			// Delivery is best-effort; a later completion or bind can resume it.
+		}
+		scheduleCompletions(current);
 	}, 100);
 	current.completionTimer.unref?.();
+}
+
+function takeCompletions(current: Runtime): {
+	completions: Completion[];
+	omitted: number;
+} {
+	const completions: Completion[] = [];
+	while (
+		current.pending.length &&
+		completions.length < MAX_COMPLETIONS_PER_MESSAGE
+	) {
+		const completion = current.pending[0]!;
+		const candidate = {
+			job: completionJob(completion.job),
+			output: completion.output.slice(-MAX_COMPLETION_OUTPUT_CHARS),
+		};
+		const candidateCompletions = [...completions, candidate];
+		const candidateContent = candidateCompletions
+			.map(
+				({ job, output }) =>
+					`${completionLine(job)}\nTail:\n${output || "(no output)"}`,
+			)
+			.join("\n\n");
+		if (
+			completions.length &&
+			JSON.stringify({
+				content: candidateContent,
+				details: candidateCompletions,
+			}).length > MAX_COMPLETION_MESSAGE_CHARS
+		)
+			break;
+		current.pending.shift();
+		completions.push(candidate);
+	}
+	const omitted = current.pendingOmitted;
+	current.pendingOmitted = 0;
+	return { completions, omitted };
+}
+
+function completionJob(job: BackgroundJob): BackgroundJob {
+	return {
+		...job,
+		command: sanitizeText(job.command, 512),
+		cwd: sanitizeText(job.cwd, 512),
+		label: job.label && sanitizeText(job.label, 240),
+	};
 }
 
 function bind(
@@ -114,7 +181,14 @@ function bind(
 		current.ctx?.ui.setStatus("background-jobs", statusText(payload));
 	});
 	current.completedUnsub = current.manager.onCompleted((job, output) => {
-		current.pending.push({ job, output: sanitizeOutput(output) });
+		if (current.pending.length >= MAX_PENDING_COMPLETIONS) {
+			current.pendingOmitted += 1;
+			return;
+		}
+		current.pending.push({
+			job: completionJob(job),
+			output: sanitizeOutput(output, MAX_COMPLETION_OUTPUT_CHARS),
+		});
 		scheduleCompletions(current);
 	});
 	scheduleCompletions(current);
@@ -129,10 +203,16 @@ const Params = Type.Object({
 		}),
 	),
 	cwd: Type.Optional(
-		Type.String({ description: "Working directory for start.", maxLength: MAX_CWD_LENGTH }),
+		Type.String({
+			description: "Working directory for start.",
+			maxLength: MAX_CWD_LENGTH,
+		}),
 	),
 	label: Type.Optional(
-		Type.String({ description: "Short human-readable job label.", maxLength: MAX_LABEL_LENGTH }),
+		Type.String({
+			description: "Short human-readable job label.",
+			maxLength: MAX_LABEL_LENGTH,
+		}),
 	),
 	timeoutMs: Type.Optional(
 		Type.Integer({
@@ -142,7 +222,10 @@ const Params = Type.Object({
 		}),
 	),
 	id: Type.Optional(
-		Type.String({ description: "Job id (required for read and stop).", maxLength: 64 }),
+		Type.String({
+			description: "Job id (required for read and stop).",
+			maxLength: 64,
+		}),
 	),
 });
 
@@ -290,7 +373,11 @@ export default function backgroundJobs(pi: ExtensionAPI): void {
 			const completions = (message.details || []) as Completion[];
 			const first = completions[0];
 			if (!first)
-				return new Text(theme.fg("dim", sanitizeOutput(String(message.content), 4_000)), 0, 0);
+				return new Text(
+					theme.fg("dim", sanitizeOutput(String(message.content), 4_000)),
+					0,
+					0,
+				);
 			const heading =
 				completions.length === 1
 					? completionLine(first.job)
@@ -350,6 +437,7 @@ export default function backgroundJobs(pi: ExtensionAPI): void {
 		if (current.completionTimer) clearTimeout(current.completionTimer);
 		current.completionTimer = undefined;
 		current.pending = [];
+		current.pendingOmitted = 0;
 		await current.manager.shutdown();
 		if (globalThis.__piBackgroundJobsRuntime === current)
 			globalThis.__piBackgroundJobsRuntime = undefined;
