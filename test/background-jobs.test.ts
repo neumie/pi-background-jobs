@@ -583,7 +583,7 @@ test("extension renderers sanitize parameters and keep results collapsed", async
 	await pi.handlers.session_shutdown({ reason: "quit" });
 });
 
-test("extension coalesces completions and reuses singleton on reload", async () => {
+test("extension steers coalesced completions and reuses singleton on reload", async () => {
 	const { default: extension } = await import("../src/index.js");
 	const first = fakePi();
 	extension(first as any);
@@ -612,7 +612,7 @@ test("extension coalesces completions and reuses singleton on reload", async () 
 	assert.match(first.sent[0].message.content, /Print second result \(job /);
 	assert.deepEqual(first.sent[0].options, {
 		triggerTurn: true,
-		deliverAs: "followUp",
+		deliverAs: "steer",
 	});
 	await assert.rejects(
 		tool.execute("missing", { action: "read", id: "nope" }),

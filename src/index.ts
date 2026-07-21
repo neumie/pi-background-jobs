@@ -131,7 +131,7 @@ function scheduleCompletions(current: Runtime): void {
 					display: true,
 					details: completions,
 				},
-				{ triggerTurn: true, deliverAs: "followUp" },
+				{ triggerTurn: true, deliverAs: "steer" },
 			);
 			void Promise.resolve(sent).catch(() => {});
 		} catch {
