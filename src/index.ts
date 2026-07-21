@@ -18,9 +18,10 @@ import {
 	type BackgroundJob,
 	type JobsChangedPayload,
 } from "./job-manager.js";
-import { JobsComponent } from "./manager-ui.js";
+import { JobsComponent, renderActiveJobsLine } from "./manager-ui.js";
 
 const COMPLETION_TYPE = "background-jobs:completion";
+const ACTIVE_WIDGET_KEY = "background-jobs-active";
 const MAX_PENDING_COMPLETIONS = 64;
 const MAX_COMPLETIONS_PER_MESSAGE = 8;
 const MAX_COMPLETION_OUTPUT_CHARS = 2_000;
@@ -78,10 +79,24 @@ function completionLine(job: BackgroundJob): string {
 	return `${name} failed (exit ${job.exitCode ?? "unknown"}${job.signal ? `, ${job.signal}` : ""}).`;
 }
 
-function statusText(payload: JobsChangedPayload): string | undefined {
-	if (!payload.runningCount) return undefined;
-	const primary = payload.primary;
-	return `${payload.runningCount} background job${payload.runningCount === 1 ? "" : "s"}: ${sanitizeText(primary?.label || primary?.command || "running", 36)}`;
+function syncActiveJobsWidget(current: Runtime): void {
+	const ctx = current.ctx;
+	if (!ctx) return;
+	if (!current.manager.list().some((job) => job.state === "running")) {
+		ctx.ui.setWidget(ACTIVE_WIDGET_KEY, undefined);
+		return;
+	}
+	ctx.ui.setWidget(
+		ACTIVE_WIDGET_KEY,
+		(_tui, theme) => ({
+			render(width: number) {
+				const line = renderActiveJobsLine(current.manager.list(), width, theme);
+				return line ? [line] : [];
+			},
+			invalidate() {},
+		}),
+		{ placement: "aboveEditor" },
+	);
 }
 
 function scheduleCompletions(current: Runtime): void {
@@ -185,7 +200,7 @@ function bind(
 	current.completedUnsub?.();
 	current.changedUnsub = current.manager.onChanged((payload) => {
 		current.pi?.events.emit("background-jobs:changed", payload);
-		current.ctx?.ui.setStatus("background-jobs", statusText(payload));
+		syncActiveJobsWidget(current);
 	});
 	current.completedUnsub = current.manager.onCompleted((job, output) => {
 		if (current.pending.length >= MAX_PENDING_COMPLETIONS) {
@@ -198,6 +213,7 @@ function bind(
 		});
 		scheduleCompletions(current);
 	});
+	syncActiveJobsWidget(current);
 	scheduleCompletions(current);
 }
 
@@ -428,13 +444,14 @@ export default function backgroundJobs(pi: ExtensionAPI): void {
 
 	pi.on("session_start", (_event, ctx) => {
 		bind(current, pi, ctx);
-		const payload = current.manager.payload();
-		ctx.ui.setStatus("background-jobs", statusText(payload));
-		pi.events.emit("background-jobs:changed", payload);
+		ctx.ui.setStatus("background-jobs", undefined);
+		pi.events.emit("background-jobs:changed", current.manager.payload());
 	});
 	pi.on("session_shutdown", async (event) => {
 		current.changedUnsub?.();
 		current.changedUnsub = undefined;
+		current.ctx?.ui.setWidget(ACTIVE_WIDGET_KEY, undefined);
+		current.ctx?.ui.setStatus("background-jobs", undefined);
 		current.ctx = undefined;
 		if (event.reason === "reload") {
 			current.reloading = true;

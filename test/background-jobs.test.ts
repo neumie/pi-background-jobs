@@ -9,7 +9,11 @@ import {
 	sanitizeOutput,
 	sanitizeText,
 } from "../src/job-manager.js";
-import { JobsComponent, renderJobsLines } from "../src/manager-ui.js";
+import {
+	JobsComponent,
+	renderActiveJobsLine,
+	renderJobsLines,
+} from "../src/manager-ui.js";
 import { visibleWidth } from "@earendil-works/pi-tui";
 
 async function waitFor(manager: JobManager, id: string, ms = 3000) {
@@ -368,6 +372,38 @@ test("changed payload is sanitized and bounded memory tails retain output", asyn
 	await manager.shutdown();
 });
 
+test("active job summary lists running labels in one width-bounded row", () => {
+	const jobs = [
+		["Typecheck", "running"],
+		["Test suite", "running"],
+		["Build", "running"],
+		["Dev server", "running"],
+		["Already done", "completed"],
+	].map(([label, state], index) => ({
+		id: String(index),
+		command: `command ${index}`,
+		cwd: "/tmp",
+		label: `${label}${index === 0 ? "\u001b[31m" : ""}`,
+		state: state as "running" | "completed",
+		startedAt: index,
+		endedAt: state === "completed" ? index + 1 : undefined,
+		exitCode: state === "completed" ? 0 : undefined,
+		bytesCaptured: 0,
+		outputTruncated: false,
+	}));
+	const line = renderActiveJobsLine(jobs, 46);
+	assert.equal(line, "  Background: Typecheck · Test suite · +2 more");
+	assert.ok(visibleWidth(line ?? "") <= 46);
+	assert.ok(visibleWidth(renderActiveJobsLine(jobs, 28) ?? "") <= 28);
+	assert.equal(
+		renderActiveJobsLine(
+			jobs.map((job) => ({ ...job, state: "completed" as const })),
+			46,
+		),
+		undefined,
+	);
+});
+
 test("manager renderer is width-safe and strips terminal controls", () => {
 	const lines = renderJobsLines(
 		[
@@ -464,6 +500,50 @@ test("manager keeps selection stable when a newer job arrives", async () => {
 	assert.doesNotMatch(detail, /Command: sleep 5 # new-arrival/);
 	component.dispose();
 	await manager.shutdown();
+});
+
+test("extension mounts running labels above the editor and clears them on completion", async () => {
+	const pi = fakePi();
+	const { default: extension } = await import("../src/index.js");
+	extension(pi as any);
+	const widgetWrites: Array<{ key: string; value: unknown; options?: unknown }> = [];
+	await pi.handlers.session_start(
+		{},
+		{
+			ui: {
+				setStatus() {},
+				setWidget(key: string, value: unknown, options?: unknown) {
+					widgetWrites.push({ key, value, options });
+				},
+			},
+		},
+	);
+	const started = await pi.tools[0].execute("widget", {
+		action: "start",
+		command: "sleep 0.1",
+		label: "Run widget test",
+	});
+	const mounted = [...widgetWrites]
+		.reverse()
+		.find((write) => typeof write.value === "function");
+	assert.ok(mounted);
+	assert.equal(mounted.key, "background-jobs-active");
+	assert.deepEqual(mounted.options, { placement: "aboveEditor" });
+	const widgetFactory = mounted.value as (
+		tui: unknown,
+		theme: { fg(name: string, value: string): string },
+	) => { render(width: number): string[] };
+	const component = widgetFactory(
+		{},
+		{ fg: (_name: string, value: string) => value },
+	);
+	assert.match(component.render(80).join("\n"), /Background: Run widget test/);
+	await waitFor(
+		(globalThis as any).__piBackgroundJobsRuntime.manager,
+		started.details.job.id,
+	);
+	assert.equal(widgetWrites.at(-1)?.value, undefined);
+	await pi.handlers.session_shutdown({ reason: "quit" });
 });
 
 test("extension renderers sanitize parameters and keep results collapsed", async () => {

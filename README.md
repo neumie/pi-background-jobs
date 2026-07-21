@@ -23,6 +23,8 @@ For development, install the locked dependency graph with `npm ci`, then run Pi 
 
 stdout and stderr are captured together in a bounded in-memory UTF-8 tail. Each job records start/end timestamps, exit code, signal, state, and bounded output metadata. Recent terminal jobs are bounded to 40 and the output tail to 16 KiB by default. Output is sanitised before display; no terminal escape sequences or hidden model reasoning are forwarded.
 
+While jobs run, one width-bounded row above the editor lists their labels, newest first—for example, `Background: Typecheck · Test suite · +2 more`. The row disappears when the last job finishes.
+
 Start rows show the human-readable label and collapse to `Running in background (/jobs to manage)`. Expand a tool row with Pi's configured tool-expand shortcut to inspect available detail. Completion messages lead with that label and retain the short process-local id only as secondary context—for example, `Validate configuration (job 0c) completed (exit 0).` They are coalesced briefly, provide a factual bounded tail to the model, and request a follow-up turn.
 
 ## `/jobs`

@@ -9,6 +9,7 @@ import { sanitizeOutput, sanitizeText } from "./job-manager.js";
 
 const LIST_ROWS = 10;
 const OUTPUT_ROWS = 12;
+const ACTIVE_LABEL_LIMIT = 8;
 
 const status = (job: BackgroundJob): string =>
 	({
@@ -64,6 +65,56 @@ function listWindow(
 		Math.max(0, selected - Math.floor(LIST_ROWS / 2)),
 	);
 	return { start, jobs: jobs.slice(start, start + LIST_ROWS) };
+}
+
+/** Compact above-editor summary of active jobs, newest first. */
+export function renderActiveJobsLine(
+	jobs: BackgroundJob[],
+	width: number,
+	theme?: Theme,
+): string | undefined {
+	const safeWidth = Number.isFinite(width)
+		? Math.max(0, Math.floor(width))
+		: 0;
+	const active = jobs.filter((job) => job.state === "running");
+	if (!active.length || safeWidth === 0) return undefined;
+	const prefix = "  Background: ";
+	const separator = " · ";
+	const labels = active.slice(0, ACTIVE_LABEL_LIMIT).map((job) => {
+		const label = sanitizeText(job.label || job.command, 80);
+		return label || `job ${sanitizeText(job.id, 16)}`;
+	});
+	const style = (shown: string[], omitted: number): string => {
+		const chunks = shown.map((label) =>
+			theme ? theme.fg("muted", label) : label,
+		);
+		if (omitted > 0) {
+			const overflow = `+${omitted} more`;
+			chunks.push(theme ? theme.fg("dim", overflow) : overflow);
+		}
+		return `${theme ? theme.fg("dim", prefix) : prefix}${chunks.join(
+			theme ? theme.fg("dim", separator) : separator,
+		)}`;
+	};
+	for (let shown = labels.length; shown > 0; shown--) {
+		const omitted = active.length - shown;
+		const candidate = style(labels.slice(0, shown), omitted);
+		if (visibleWidth(candidate) <= safeWidth) return candidate;
+	}
+
+	const omitted = active.length - 1;
+	const suffix = omitted > 0 ? `${separator}+${omitted} more` : "";
+	const labelWidth = safeWidth - visibleWidth(prefix) - visibleWidth(suffix);
+	if (labelWidth > 0) {
+		const label = truncateToWidth(labels[0] ?? "running", labelWidth, "…");
+		return style([label], omitted);
+	}
+	const fallback = `  Background: ${active.length} running`;
+	return truncateToWidth(
+		theme ? theme.fg("dim", fallback) : fallback,
+		safeWidth,
+		"…",
+	);
 }
 
 /** Pure, escape-safe manager lines. Kept separate so render bounds are testable. */
