@@ -23,7 +23,7 @@ For development, install the locked dependency graph with `npm ci`, then run Pi 
 
 stdout and stderr are captured together in a bounded in-memory UTF-8 tail. Each job records start/end timestamps, exit code, signal, state, and bounded output metadata. Recent terminal jobs are bounded to 40 and the output tail to 16 KiB by default. Output is sanitised before display; no terminal escape sequences or hidden model reasoning are forwarded.
 
-While jobs run, one width-bounded row above the editor lists their labels, newest first—for example, `Background: Typecheck · Test suite · +2 more`. The row disappears when the last job finishes.
+Without [`pi-sidebar`](https://github.com/neumie/pi-sidebar), running jobs use a standalone width-bounded row above the editor—for example, `Background: Typecheck · Test suite · +2 more`. As soon as a compatible sidebar host announces readiness, this native row is removed and stays suppressed; job state continues flowing through `background-jobs:changed` into the sidebar. The standalone row returns on a later session only when no sidebar host is present.
 
 Start rows show the human-readable label and collapse to `Running in background (/jobs to manage)`. Expand a tool row with Pi's configured tool-expand shortcut to inspect available detail. Completion messages lead with that label and retain the short process-local id only as secondary context—for example, `Validate configuration (job 0c) completed (exit 0).` They are coalesced briefly, provide a factual bounded tail to the model, and steer the active agent at its next safe tool boundary. If the agent is idle, completion triggers a turn immediately.
 
@@ -44,7 +44,7 @@ The extension emits `background-jobs:changed` through `pi.events` whenever aggre
 }
 ```
 
-`primary.command` is a sanitized, length-bounded display value, and `primary.startedAt` belongs to that same job so elapsed labels remain accurate. This payload is suitable for a custom footer; it contains no output or filesystem paths.
+`primary.command` is a sanitized, length-bounded display value, and `primary.startedAt` belongs to that same job so elapsed labels remain accurate. This payload is suitable for `pi-sidebar` or another activity surface; it contains no output or filesystem paths.
 
 ## Lifecycle
 

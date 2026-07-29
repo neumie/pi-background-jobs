@@ -22,6 +22,8 @@ import { JobsComponent, renderActiveJobsLine } from "./manager-ui.js";
 
 const COMPLETION_TYPE = "background-jobs:completion";
 const ACTIVE_WIDGET_KEY = "background-jobs-active";
+const SIDEBAR_READY_EVENT = "@neumie/pi-sidebar:v1:ready";
+const SIDEBAR_PROTOCOL_VERSION = 1;
 const MAX_PENDING_COMPLETIONS = 64;
 const MAX_COMPLETIONS_PER_MESSAGE = 8;
 const MAX_COMPLETION_OUTPUT_CHARS = 2_000;
@@ -47,6 +49,8 @@ interface Runtime {
 	pendingOmitted: number;
 	completionTimer?: ReturnType<typeof setTimeout>;
 	reloading?: boolean;
+	sidebarAvailable: boolean;
+	sidebarReadyUnsub?: () => void;
 }
 
 declare global {
@@ -59,6 +63,7 @@ function runtime(): Runtime {
 			manager: new JobManager(),
 			pending: [],
 			pendingOmitted: 0,
+			sidebarAvailable: false,
 		};
 	return globalThis.__piBackgroundJobsRuntime;
 }
@@ -79,9 +84,21 @@ function completionLine(job: BackgroundJob): string {
 	return `${name} failed (exit ${job.exitCode ?? "unknown"}${job.signal ? `, ${job.signal}` : ""}).`;
 }
 
+function isSidebarReady(value: unknown): boolean {
+	if (!value || typeof value !== "object") return false;
+	const payload = value as Record<string, unknown>;
+	return payload.version === SIDEBAR_PROTOCOL_VERSION
+		&& typeof payload.hostId === "string"
+		&& payload.hostId.length > 0;
+}
+
 function syncActiveJobsWidget(current: Runtime): void {
 	const ctx = current.ctx;
 	if (!ctx) return;
+	if (current.sidebarAvailable) {
+		ctx.ui.setWidget(ACTIVE_WIDGET_KEY, undefined);
+		return;
+	}
 	if (!current.manager.list().some((job) => job.state === "running")) {
 		ctx.ui.setWidget(ACTIVE_WIDGET_KEY, undefined);
 		return;
@@ -258,6 +275,12 @@ function toolText(job: BackgroundJob): string {
 
 export default function backgroundJobs(pi: ExtensionAPI): void {
 	const current = runtime();
+	current.sidebarReadyUnsub?.();
+	current.sidebarReadyUnsub = pi.events.on(SIDEBAR_READY_EVENT, (payload) => {
+		if (!isSidebarReady(payload)) return;
+		current.sidebarAvailable = true;
+		syncActiveJobsWidget(current);
+	});
 	bind(current, pi);
 
 	pi.registerTool<typeof Params, ToolDetails>({
@@ -453,11 +476,14 @@ export default function backgroundJobs(pi: ExtensionAPI): void {
 		current.ctx?.ui.setWidget(ACTIVE_WIDGET_KEY, undefined);
 		current.ctx?.ui.setStatus("background-jobs", undefined);
 		current.ctx = undefined;
+		current.sidebarAvailable = false;
 		if (event.reason === "reload") {
 			current.reloading = true;
 			current.pi = undefined;
 			return;
 		}
+		current.sidebarReadyUnsub?.();
+		current.sidebarReadyUnsub = undefined;
 		current.completedUnsub?.();
 		current.completedUnsub = undefined;
 		if (current.completionTimer) clearTimeout(current.completionTimer);

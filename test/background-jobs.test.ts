@@ -546,6 +546,57 @@ test("extension mounts running labels above the editor and clears them on comple
 	await pi.handlers.session_shutdown({ reason: "quit" });
 });
 
+test("extension removes its active widget when pi-sidebar owns activity display", async () => {
+	const pi = fakePi();
+	const { default: extension } = await import("../src/index.js");
+	extension(pi as any);
+	const widgetWrites: Array<{ key: string; value: unknown; options?: unknown }> = [];
+	await pi.handlers.session_start(
+		{},
+		{
+			ui: {
+				setStatus() {},
+				setWidget(key: string, value: unknown, options?: unknown) {
+					widgetWrites.push({ key, value, options });
+				},
+			},
+		},
+	);
+	const first = await pi.tools[0].execute("sidebar-widget-first", {
+		action: "start",
+		command: "sleep 0.2",
+		label: "Visible before sidebar",
+	});
+	assert.ok(widgetWrites.some((write) => typeof write.value === "function"));
+
+	pi.events.emit("@neumie/pi-sidebar:v1:ready", {
+		version: 1,
+		hostId: "sidebar-test-host",
+	});
+	assert.equal(widgetWrites.at(-1)?.key, "background-jobs-active");
+	assert.equal(widgetWrites.at(-1)?.value, undefined);
+	const writesAfterReady = widgetWrites.length;
+
+	const second = await pi.tools[0].execute("sidebar-widget-second", {
+		action: "start",
+		command: "sleep 0.1",
+		label: "Sidebar only",
+	});
+	assert.ok(
+		widgetWrites.slice(writesAfterReady).every((write) => write.value === undefined),
+		"the native widget must not remount after sidebar readiness",
+	);
+	await waitFor(
+		(globalThis as any).__piBackgroundJobsRuntime.manager,
+		first.details.job.id,
+	);
+	await waitFor(
+		(globalThis as any).__piBackgroundJobsRuntime.manager,
+		second.details.job.id,
+	);
+	await pi.handlers.session_shutdown({ reason: "quit" });
+});
+
 test("extension renderers sanitize parameters and keep results collapsed", async () => {
 	const pi = fakePi();
 	const { default: extension } = await import("../src/index.js");
@@ -691,14 +742,20 @@ function fakePi() {
 	const tools: any[] = [];
 	const handlers: Record<string, any> = {};
 	const sent: any[] = [];
+	const eventListeners = new Map<string, Set<(payload: unknown) => void>>();
 	return {
 		tools,
 		handlers,
 		sent,
 		events: {
-			emit() {},
-			on() {
-				return () => {};
+			emit(name: string, payload: unknown) {
+				for (const listener of eventListeners.get(name) ?? []) listener(payload);
+			},
+			on(name: string, listener: (payload: unknown) => void) {
+				const listeners = eventListeners.get(name) ?? new Set();
+				listeners.add(listener);
+				eventListeners.set(name, listeners);
+				return () => listeners.delete(listener);
 			},
 		},
 		registerTool(tool: any) {
