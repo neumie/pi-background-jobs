@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { setTimeout as delay } from "node:timers/promises";
 import {
 	JobManager,
+	type JobsChangedPayload,
 	MAX_TIMEOUT_MS,
 	sanitizeOutput,
 	sanitizeText,
@@ -352,6 +353,39 @@ test(
 	},
 );
 
+test("changed payload exposes sanitized running jobs without private ids", async (t) => {
+	let now = 100;
+	const manager = new JobManager({ now: () => now, killGraceMs: 10 });
+	t.after(() => manager.shutdown());
+	await manager.start({ command: "sleep 30 # /Users/alice/private" });
+	now = 200;
+	await manager.start({ command: "sleep 30", label: "Second\u001b[31m job" });
+
+	const payload = manager.payload();
+	assert.equal(payload.runningCount, 2);
+	assert.equal(payload.runningOmitted, 0);
+	assert.deepEqual(payload.running, [
+		{ label: "Second job", startedAt: 200 },
+		{ startedAt: 100 },
+	]);
+	assert.ok(payload.running.every((job) => !("id" in job) && !("command" in job)));
+	await manager.shutdown();
+});
+
+test("changed payload bounds newest running summaries across timestamp ties", async (t) => {
+	const manager = new JobManager({ now: () => 1, killGraceMs: 10 });
+	t.after(() => manager.shutdown());
+	for (let index = 1; index <= 17; index += 1) {
+		await manager.start({ command: "sleep 30", label: `Job ${index}` });
+	}
+	const payload = manager.payload();
+	assert.equal(payload.runningCount, 17);
+	assert.equal(payload.running.length, 16);
+	assert.equal(payload.runningOmitted, 1);
+	assert.equal(payload.running[0]?.label, "Job 17");
+	assert.equal(payload.running.at(-1)?.label, "Job 2");
+});
+
 test("changed payload is sanitized and bounded memory tails retain output", async () => {
 	const manager = new JobManager({ maxTailBytes: 10 });
 	const events: unknown[] = [];
@@ -562,12 +596,17 @@ test("extension removes its active widget when pi-sidebar owns activity display"
 			},
 		},
 	);
+	const snapshots: JobsChangedPayload[] = [];
+	pi.events.on("background-jobs:changed", (payload: unknown) => {
+		snapshots.push(payload as JobsChangedPayload);
+	});
 	const first = await pi.tools[0].execute("sidebar-widget-first", {
 		action: "start",
 		command: "sleep 0.2",
 		label: "Visible before sidebar",
 	});
 	assert.ok(widgetWrites.some((write) => typeof write.value === "function"));
+	snapshots.length = 0;
 
 	pi.events.emit("@neumie/pi-sidebar:v1:ready", {
 		version: 1,
@@ -575,6 +614,9 @@ test("extension removes its active widget when pi-sidebar owns activity display"
 	});
 	assert.equal(widgetWrites.at(-1)?.key, "background-jobs-active");
 	assert.equal(widgetWrites.at(-1)?.value, undefined);
+	assert.equal(snapshots.length, 1);
+	assert.equal(snapshots[0]?.runningCount, 1);
+	assert.equal(snapshots[0]?.running[0]?.label, "Visible before sidebar");
 	const writesAfterReady = widgetWrites.length;
 
 	const second = await pi.tools[0].execute("sidebar-widget-second", {

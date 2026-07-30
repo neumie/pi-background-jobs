@@ -46,11 +46,18 @@ export interface JobManagerOptions {
 	onListenerError?: (error: unknown) => void;
 }
 
+export interface RunningJobSummary {
+	label?: string;
+	startedAt: number;
+}
+
 export interface JobsChangedPayload {
 	runningCount: number;
 	terminalRecentCount: number;
 	oldestStart?: number;
 	primary?: { id: string; label?: string; command: string; startedAt: number };
+	running: RunningJobSummary[];
+	runningOmitted: number;
 }
 
 type InternalJob = BackgroundJob & {
@@ -68,6 +75,7 @@ const defaults = {
 	maxRecent: 40,
 	killGraceMs: 750,
 };
+const MAX_RUNNING_SUMMARIES = 16;
 
 type LifecycleState = "open" | "shutting-down" | "closed";
 type Listener<Args extends unknown[]> = (...args: Args) => void | Promise<void>;
@@ -127,7 +135,10 @@ export class JobManager {
 
 	list(): BackgroundJob[] {
 		return [...this.jobs.values()]
-			.sort((a, b) => b.startedAt - a.startedAt)
+			.sort((a, b) =>
+				b.startedAt - a.startedAt
+				|| Number.parseInt(b.id, 36) - Number.parseInt(a.id, 36),
+			)
 			.map((job) => this.snapshot(job));
 	}
 	get(id: string): BackgroundJob | undefined {
@@ -197,6 +208,10 @@ export class JobManager {
 		const running = all.filter((job) => job.state === "running");
 		const terminal = all.filter((job) => job.state !== "running");
 		const primary = running[0] || terminal[0];
+		const exposedRunning = running.slice(0, MAX_RUNNING_SUMMARIES).map((job) => ({
+			...(job.label ? { label: sanitizeText(job.label, 120) } : {}),
+			startedAt: job.startedAt,
+		}));
 		return {
 			runningCount: running.length,
 			terminalRecentCount: terminal.length,
@@ -209,6 +224,8 @@ export class JobManager {
 				command: sanitizeText(primary.command, 120),
 				startedAt: primary.startedAt,
 			},
+			running: exposedRunning,
+			runningOmitted: running.length - exposedRunning.length,
 		};
 	}
 

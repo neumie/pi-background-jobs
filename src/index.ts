@@ -280,6 +280,7 @@ export default function backgroundJobs(pi: ExtensionAPI): void {
 		if (!isSidebarReady(payload)) return;
 		current.sidebarAvailable = true;
 		syncActiveJobsWidget(current);
+		pi.events.emit("background-jobs:changed", current.manager.payload());
 	});
 	bind(current, pi);
 
@@ -496,5 +497,5 @@ export default function backgroundJobs(pi: ExtensionAPI): void {
 	});
 }
 
-/** Stable event bus payload emitted on `background-jobs:changed`: runningCount, terminalRecentCount, oldestStart, and primary job identity. */
+/** Stable bounded payload emitted on `background-jobs:changed`, including private-ID-free running summaries. */
 export type BackgroundJobsChangedEvent = JobsChangedPayload;

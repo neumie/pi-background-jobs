@@ -23,7 +23,7 @@ For development, install the locked dependency graph with `npm ci`, then run Pi 
 
 stdout and stderr are captured together in a bounded in-memory UTF-8 tail. Each job records start/end timestamps, exit code, signal, state, and bounded output metadata. Recent terminal jobs are bounded to 40 and the output tail to 16 KiB by default. Output is sanitised before display; no terminal escape sequences or hidden model reasoning are forwarded.
 
-Without [`pi-sidebar`](https://github.com/neumie/pi-sidebar), running jobs use a standalone width-bounded row above the editor—for example, `Background: Typecheck · Test suite · +2 more`. As soon as a compatible sidebar host announces readiness, this native row is removed and stays suppressed; job state continues flowing through `background-jobs:changed` into the sidebar. The standalone row returns on a later session only when no sidebar host is present.
+Without [`pi-sidebar`](https://github.com/neumie/pi-sidebar), running jobs use a standalone width-bounded row above the editor—for example, `Background: Typecheck · Test suite · +2 more`. As soon as a compatible sidebar host announces readiness, this native row is removed and stays suppressed; the extension immediately replays its current `background-jobs:changed` snapshot, then continues emitting every state change. The standalone row returns on a later session only when no sidebar host is present.
 
 Start rows show the human-readable label and collapse to `Running in background (/jobs to manage)`. Expand a tool row with Pi's configured tool-expand shortcut to inspect available detail. Completion messages lead with that label and retain the short process-local id only as secondary context—for example, `Validate configuration (job 0c) completed (exit 0).` They are coalesced briefly, provide a factual bounded tail to the model, and steer the active agent at its next safe tool boundary. If the agent is idle, completion triggers a turn immediately.
 
@@ -41,10 +41,12 @@ The extension emits `background-jobs:changed` through `pi.events` whenever aggre
   terminalRecentCount: number;
   oldestStart?: number; // epoch milliseconds; only when a job runs
   primary?: { id: string; label?: string; command: string; startedAt: number };
+  running: Array<{ label?: string; startedAt: number }>;
+  runningOmitted: number;
 }
 ```
 
-`primary.command` is a sanitized, length-bounded display value, and `primary.startedAt` belongs to that same job so elapsed labels remain accurate. This payload is suitable for `pi-sidebar` or another activity surface; it contains no output or filesystem paths.
+`running` contains the newest at most 16 active jobs. Its entries deliberately omit private process-local ids and commands; `runningOmitted` is the exact number excluded by that bound. Labels are sanitized and length-bounded, and every timestamp belongs to the same summarized job so elapsed labels remain accurate. `primary` remains for aggregate-only compatibility and still carries the legacy bounded command field. Privacy-sensitive surfaces should render only labels (or a neutral fallback), never that command. The event contains no output or working-directory field.
 
 ## Lifecycle
 
@@ -57,7 +59,7 @@ npm ci
 npm run check
 ```
 
-The tests exercise completion/failure/timeout/stopping, output bounds, event payloads, manager rendering safety, completion coalescing, reload reuse, and shutdown cleanup.
+The tests exercise completion/failure/timeout/stopping, output bounds, bounded activity snapshots and readiness replay, manager rendering safety, completion coalescing, reload reuse, and shutdown cleanup.
 
 ## License
 
