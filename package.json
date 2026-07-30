@@ -1,6 +1,6 @@
 {
   "name": "pi-background-jobs",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Compact, non-interactive background shell jobs and management UI for Pi",
   "type": "module",
   "engines": {
@@ -24,9 +24,9 @@
     "typebox": "^1.0.0"
   },
   "peerDependencies": {
-    "@earendil-works/pi-ai": ">=0.82.1 <0.83.0",
-    "@earendil-works/pi-coding-agent": ">=0.82.1 <0.83.0",
-    "@earendil-works/pi-tui": ">=0.82.1 <0.83.0"
+    "@earendil-works/pi-ai": ">=0.82.1 <0.84.0",
+    "@earendil-works/pi-coding-agent": ">=0.82.1 <0.84.0",
+    "@earendil-works/pi-tui": ">=0.82.1 <0.84.0"
   },
   "devDependencies": {
     "@earendil-works/pi-ai": "^0.82.1",
